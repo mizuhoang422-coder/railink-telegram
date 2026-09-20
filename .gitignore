@@ -1,4 +1,4 @@
-config.py
+﻿# config.py -- KHONG ignore, chi doc env
 .env
 *.session
 *.session-journal

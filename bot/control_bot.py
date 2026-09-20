@@ -1509,5 +1509,8 @@ async def cb_settings(c: CallbackQuery):
 
 
 async def run_bot():
-    await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
     await dp.start_polling(bot)
