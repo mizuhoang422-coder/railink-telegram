@@ -1,5 +1,6 @@
-# language: Python, file: core/state.py
+﻿# language: Python, file: core/state.py
 import json
+import time
 from datetime import date
 from config import STATE_FILE
 
@@ -34,3 +35,26 @@ def bump_count(session_name: str, n: int = 1) -> int:
     data[session_name] = entry
     _save(data)
     return entry["count"]
+
+
+# ---------- target cooldown ----------
+
+def target_last_sent(target: str) -> float:
+    """Unix timestamp lần cuối target này bị gửi. 0 nếu chưa bao giờ."""
+    return float(_load().get("_targets", {}).get(target, 0))
+
+
+def mark_target_sent(target: str):
+    """Đánh dấu target vừa gửi. Dọn entry cũ hơn 24h để state không phình."""
+    data = _load()
+    targets = data.setdefault("_targets", {})
+    targets[target] = time.time()
+    cutoff = time.time() - 86400
+    data["_targets"] = {k: v for k, v in targets.items() if v > cutoff}
+    _save(data)
+
+
+def target_on_cooldown(target: str, cooldown_sec: int) -> bool:
+    if cooldown_sec <= 0:
+        return False
+    return (time.time() - target_last_sent(target)) < cooldown_sec

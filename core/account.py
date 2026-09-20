@@ -1,32 +1,45 @@
-# language: Python, file: core/account.py
+﻿# language: Python, file: core/account.py
 import asyncio
 import random
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.errors import FloodWaitError, PeerFloodError
 
 from config import (
     API_ID, API_HASH, IMAGES_DIR, MIN_DELAY, MAX_DELAY,
-    DAILY_MSG_CAP, BIO_ROTATE_EVERY,
+    DAILY_MSG_CAP, BIO_ROTATE_EVERY, TARGET_COOLDOWN,
 )
 from core.spintax import spintax
-from core.state import daily_count, bump_count
+from core.state import (
+    daily_count, bump_count,
+    target_on_cooldown, mark_target_sent,
+)
+
+# Global lock — đảm bảo 2 acc không bao giờ pick cùng 1 target cùng lúc
+_PICK_LOCK = asyncio.Lock()
 
 
 class AccountWorker:
-    def __init__(self, session_path: Path, proxy, messages, targets, bios, notify):
-        self.session_path = session_path
-        self.name         = session_path.stem
-        self.proxy        = proxy
-        self.messages     = messages
-        self.targets      = targets
-        self.bios         = bios
-        self.notify       = notify
+    def __init__(self, source, proxy, messages, targets, bios, notify, session_string=None):
+        if session_string:
+            self.name = str(source)
+            session_arg = StringSession(session_string)
+        else:
+            p = Path(source)
+            self.name = p.stem
+            session_arg = str(p)
+
+        self.proxy    = proxy
+        self.messages = messages
+        self.targets  = targets
+        self.bios     = bios
+        self.notify   = notify
 
         self.client = TelegramClient(
-            str(session_path), API_ID, API_HASH, proxy=proxy,
+            session_arg, API_ID, API_HASH, proxy=proxy,
             device_model="Desktop", system_version="Windows 10",
             app_version="4.16.8",
         )
@@ -35,6 +48,22 @@ class AccountWorker:
         self.sent       = 0
         self.errors     = 0
         self._since_bio = 0
+
+    async def _pick_target(self):
+        """Pick 1 target chưa cooldown. Mark ngay khi pick (atomic trong lock).
+
+        Trả về None nếu tất cả target đang cooldown.
+        """
+        async with _PICK_LOCK:
+            available = [
+                t for t in self.targets
+                if not target_on_cooldown(t, TARGET_COOLDOWN)
+            ]
+            if not available:
+                return None
+            target = random.choice(available)
+            mark_target_sent(target)
+            return target
 
     async def rotate_bio(self):
         if not self.bios:
@@ -66,7 +95,12 @@ class AccountWorker:
             await asyncio.sleep(30)
             return False
 
-        target_raw = random.choice(self.targets)
+        target_raw = await self._pick_target()
+        if not target_raw:
+            # tất cả target đang cooldown — chờ rồi thử lại, im lặng
+            await asyncio.sleep(60)
+            return False
+
         entity = await self._resolve_target(target_raw)
         if entity is None:
             return False
@@ -84,7 +118,9 @@ class AccountWorker:
             self.sent += 1
             self._since_bio += 1
             count = bump_count(self.name)
-            await self.notify(f"📊 <b>{self.name}</b> → <code>{target_raw}</code>  ({count}/{DAILY_MSG_CAP} hôm nay)")
+            await self.notify(
+                f"📊 <b>{self.name}</b> → <code>{target_raw}</code>  ({count}/{DAILY_MSG_CAP})"
+            )
 
             if BIO_ROTATE_EVERY and self._since_bio >= BIO_ROTATE_EVERY:
                 self._since_bio = 0
