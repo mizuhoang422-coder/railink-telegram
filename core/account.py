@@ -10,7 +10,7 @@ from telethon.errors import FloodWaitError, PeerFloodError
 
 from config import (
     API_ID, API_HASH, IMAGES_DIR, MIN_DELAY, MAX_DELAY,
-    DAILY_MSG_CAP, BIO_ROTATE_EVERY, TARGET_COOLDOWN,
+    DAILY_MSG_CAP, BIO_ROTATE_EVERY, TARGET_COOLDOWN, CHECK_TOP_SELF,
 )
 from core.spintax import spintax
 from core.state import (
@@ -18,12 +18,12 @@ from core.state import (
     target_on_cooldown, mark_target_sent,
 )
 
-# Global lock — đảm bảo 2 acc không bao giờ pick cùng 1 target cùng lúc
 _PICK_LOCK = asyncio.Lock()
 
 
 class AccountWorker:
-    def __init__(self, source, proxy, messages, targets, bios, notify, session_string=None):
+    def __init__(self, source, proxy, messages, targets, bios, notify,
+                 session_string=None, all_ids=None):
         if session_string:
             self.name = str(source)
             session_arg = StringSession(session_string)
@@ -37,6 +37,8 @@ class AccountWorker:
         self.targets  = targets
         self.bios     = bios
         self.notify   = notify
+        # Set các user_id của toàn bộ acc team — dùng để phát hiện tin cuối có phải acc mình
+        self.all_ids  = set(all_ids or [])
 
         self.client = TelegramClient(
             session_arg, API_ID, API_HASH, proxy=proxy,
@@ -49,21 +51,64 @@ class AccountWorker:
         self.errors     = 0
         self._since_bio = 0
 
-    async def _pick_target(self):
-        """Pick 1 target chưa cooldown. Mark ngay khi pick (atomic trong lock).
+    async def _top_is_self(self, entity) -> bool:
+        """True nếu tin nhắn cuối cùng trong group là của 1 acc team mình."""
+        if not CHECK_TOP_SELF or not self.all_ids:
+            return False
+        try:
+            msgs = await self.client.get_messages(entity, limit=1)
+        except Exception:
+            return False
+        if not msgs:
+            return False
+        sender = msgs[0].sender_id
+        return sender in self.all_ids
 
-        Trả về None nếu tất cả target đang cooldown.
+    async def _resolve_target(self, target: str):
+        t = target.strip()
+        if not t:
+            return None
+        if t.startswith("https://t.me/") or t.startswith("@"):
+            try:
+                return await self.client.get_entity(t)
+            except Exception as e:
+                await self.notify(
+                    f"❌ <b>{self.name}</b> bad target <code>{t}</code>: {type(e).__name__}"
+                )
+                return None
+        return t
+
+    async def _pick_target(self):
+        """Pick 1 target (cooldown chưa hết → bỏ). Trong lock:
+        - resolve target
+        - check top-of-chat không phải acc mình
+        - mark cooldown
+        Trả về (target_raw, entity) hoặc (None, None).
         """
         async with _PICK_LOCK:
-            available = [
+            candidates = [
                 t for t in self.targets
                 if not target_on_cooldown(t, TARGET_COOLDOWN)
             ]
-            if not available:
-                return None
-            target = random.choice(available)
-            mark_target_sent(target)
-            return target
+            random.shuffle(candidates)
+
+            for t in candidates:
+                entity = await self._resolve_target(t)
+                if entity is None:
+                    continue
+
+                # Tin cuối là acc mình → skip group này
+                if await self._top_is_self(entity):
+                    await self.notify(
+                        f"⏭ <b>{self.name}</b> skip <code>{t}</code> "
+                        f"(tin cuối là acc team)"
+                    )
+                    continue
+
+                mark_target_sent(t)
+                return t, entity
+
+            return None, None
 
     async def rotate_bio(self):
         if not self.bios:
@@ -78,31 +123,15 @@ class AccountWorker:
             self.errors += 1
             await self.notify(f"❌ <b>{self.name}</b> bio err: <code>{type(e).__name__}</code>")
 
-    async def _resolve_target(self, target: str):
-        t = target.strip()
-        if not t:
-            return None
-        if t.startswith("https://t.me/") or t.startswith("@"):
-            try:
-                return await self.client.get_entity(t)
-            except Exception as e:
-                await self.notify(f"❌ <b>{self.name}</b> bad target <code>{t}</code>: {type(e).__name__}")
-                return None
-        return t
-
     async def send_one(self) -> bool:
         if not self.targets or not self.messages:
             await asyncio.sleep(30)
             return False
 
-        target_raw = await self._pick_target()
+        target_raw, entity = await self._pick_target()
         if not target_raw:
-            # tất cả target đang cooldown — chờ rồi thử lại, im lặng
+            # hết target khả dụng (cooldown hết nhưng top là acc mình)
             await asyncio.sleep(60)
-            return False
-
-        entity = await self._resolve_target(target_raw)
-        if entity is None:
             return False
 
         text = spintax(random.choice(self.messages))
@@ -138,7 +167,9 @@ class AccountWorker:
             return False
         except Exception as e:
             self.errors += 1
-            await self.notify(f"❌ <b>{self.name}</b> send err: <code>{type(e).__name__}: {e}</code>")
+            await self.notify(
+                f"❌ <b>{self.name}</b> send err: <code>{type(e).__name__}: {e}</code>"
+            )
             return False
 
     async def run(self):
@@ -151,6 +182,7 @@ class AccountWorker:
             return
 
         me = await self.client.get_me()
+        self.all_ids.add(me.id)
         await self.notify(f"🚀 <b>{self.name}</b> online as @{me.username or me.id}")
 
         try:
