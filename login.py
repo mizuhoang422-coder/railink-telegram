@@ -1,4 +1,4 @@
-# language: Python, file: login.py
+﻿# language: Python, file: login.py
 import _force_ipv4  # noqa: F401
 import asyncio
 import getpass
@@ -7,13 +7,6 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 from config import API_ID, API_HASH, SESSIONS_DIR
-
-
-def _read_first_proxy():
-    from core.manager import _read_lines, _parse_proxy
-    from config import PROXIES_FILE
-    lines = _read_lines(PROXIES_FILE)
-    return _parse_proxy(lines[0]) if lines else None
 
 
 async def interactive_login():
@@ -28,9 +21,8 @@ async def interactive_login():
     clean = phone.replace("+", "").replace(" ", "")
     session_path = SESSIONS_DIR / clean
 
-    proxy = _read_first_proxy()
     client = TelegramClient(
-        str(session_path), API_ID, API_HASH, proxy=proxy,
+        str(session_path), API_ID, API_HASH,
         device_model="Desktop", system_version="Windows 10", app_version="4.16.8",
     )
 
