@@ -1,0 +1,3 @@
+telethon>=1.36
+aiogram>=3.13
+python-socks[asyncio]>=2.4
